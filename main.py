@@ -1,14 +1,12 @@
 import logging
 import os
+
+from logging_config import setup_logging
+
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 
-# Configure logging
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+logger = setup_logging()
 
 # Load bad words list
 def load_bad_words():
