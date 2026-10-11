@@ -19,7 +19,8 @@ WORKDIR /app
 COPY --from=builder /install /usr/local
 
 # Copy only the source files needed at runtime
-COPY main.py logging_config.py ./
+COPY main.py logging_config.py config.py handlers.py ./
+COPY moderators/ ./moderators/
 
 # These files are mounted at runtime via volumes (see docker-compose.yml),
 # but we copy defaults so the image can run without a mounted volume.

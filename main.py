@@ -1,406 +1,33 @@
-"""Telegram moderator bot that deletes swear words in group chats."""
+"""Entry point for Bad Words Bot."""
 
 from __future__ import annotations
 
 import asyncio
 import os
-import random
-import re
 import sys
-from pathlib import Path
 
 from dotenv import load_dotenv
-import yaml
-from telegram import ChatMemberAdministrator, ChatMemberOwner, Update
-from telegram.constants import ChatType, ParseMode
-from telegram.error import BadRequest, Forbidden, TelegramError
+from telegram import Update
 from telegram.ext import (
     Application,
     ChatMemberHandler,
     CommandHandler,
-    ContextTypes,
     MessageHandler,
-    filters,
 )
 
+from handlers import (
+    CONFIG,
+    GROUP_MESSAGES,
+    MODERATION_SERVICE,
+    check_message,
+    on_my_chat_member,
+    post_init,
+    post_shutdown,
+    start,
+)
 from logging_config import setup_logging
 
 logger = setup_logging()
-
-BASE_DIR = Path(__file__).resolve().parent
-BAD_WORDS_FILE = BASE_DIR / "bad_words.txt"
-CONFIG_FILE = BASE_DIR / "config.yaml"
-
-# Groups and supergroups only. Channel comments live in a linked
-# discussion *group*, but ordinary group messages are ignored by Telegram
-# unless privacy mode is disabled or the bot is an administrator.
-GROUP_CHAT_TYPES = frozenset({ChatType.GROUP, ChatType.SUPERGROUP})
-GROUP_MESSAGES = (
-    filters.ChatType.GROUPS
-    & (filters.TEXT | filters.CAPTION)
-    & ~filters.COMMAND
-    & ~filters.IS_AUTOMATIC_FORWARD
-)
-
-
-class BadWordMatcher:
-    """Load swear words from disk and match them as whole words/phrases."""
-
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self._mtime: float | None = None
-        self._pattern: re.Pattern[str] | None = None
-        self._words: tuple[str, ...] = ()
-
-    @property
-    def words(self) -> tuple[str, ...]:
-        """Currently loaded phrases."""
-        self._reload_if_changed()
-        return self._words
-
-    def find_matches(self, text: str) -> list[str]:
-        """Return the configured phrases found in *text*."""
-        self._reload_if_changed()
-        if self._pattern is None or not text:
-            return []
-        return [match.group(0) for match in self._pattern.finditer(text)]
-
-    def _reload_if_changed(self) -> None:
-        try:
-            mtime = self.path.stat().st_mtime
-        except OSError:
-            if self._mtime is not None:
-                return
-            logger.warning(
-                "Could not read %s; no phrases loaded",
-                self.path,
-            )
-            self._mtime = -1.0
-            self._words = ()
-            self._pattern = None
-            return
-
-        if self._mtime == mtime:
-            return
-
-        words = _read_word_list(self.path)
-        self._mtime = mtime
-        self._words = tuple(words)
-        self._pattern = _compile_pattern(words)
-        logger.info("Loaded %s bad words from %s", len(words), self.path)
-
-
-def _read_word_list(path: Path) -> list[str]:
-    """Read unique, non-empty phrases from *path*."""
-    seen: set[str] = set()
-    words: list[str] = []
-    with path.open(encoding="utf-8") as handle:
-        for raw_line in handle:
-            line = raw_line.strip()
-            if not line or line.startswith("#"):
-                continue
-            phrase = line.casefold()
-            if phrase in seen:
-                continue
-            seen.add(phrase)
-            words.append(phrase)
-    return words
-
-
-def _compile_pattern(words: list[str]) -> re.Pattern[str] | None:
-    """Build a Unicode-aware whole-word pattern, longest phrases first."""
-    if not words:
-        return None
-    parts = sorted((re.escape(word) for word in words), key=len, reverse=True)
-    pattern = rf"(?<!\w)(?:{'|'.join(parts)})(?!\w)"
-    return re.compile(pattern, flags=re.IGNORECASE | re.UNICODE)
-
-
-MATCHER = BadWordMatcher(BAD_WORDS_FILE)
-
-VALID_MODES = frozenset({"delete_and_warn", "warn_only", "delete_only"})
-DEFAULT_WARNING_MESSAGES = (
-    "⚠️ {mention}, your message has been deleted because it "
-    "contains inappropriate words.",
-)
-
-
-class BotConfig:
-    """Load configuration from YAML and reload when the file changes."""
-
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self._mtime: float | None = None
-        self._mode: str = "delete_and_warn"
-        self._warning_lifetime: int = 5
-        self._warning_messages: tuple[str, ...] = DEFAULT_WARNING_MESSAGES
-
-    @property
-    def mode(self) -> str:
-        self._reload_if_changed()
-        return self._mode
-
-    @property
-    def warning_lifetime_seconds(self) -> int:
-        self._reload_if_changed()
-        return self._warning_lifetime
-
-    @property
-    def warning_messages(self) -> tuple[str, ...]:
-        self._reload_if_changed()
-        return self._warning_messages
-
-    def _reload_if_changed(self) -> None:
-        try:
-            mtime = self.path.stat().st_mtime
-        except OSError:
-            if self._mtime is not None:
-                return
-            logger.warning(
-                "Could not read %s; using default configuration",
-                self.path,
-            )
-            self._mtime = -1.0
-            return
-
-        if self._mtime == mtime:
-            return
-
-        try:
-            with self.path.open(encoding="utf-8") as handle:
-                data = yaml.safe_load(handle) or {}
-        except Exception as exc:
-            logger.error(
-                "Failed to parse %s: %s; keeping current configuration",
-                self.path,
-                exc,
-            )
-            self._mtime = mtime
-            return
-
-        mode = str(data.get("mode", "delete_and_warn")).strip().lower()
-        if mode not in VALID_MODES:
-            logger.warning(
-                "Invalid mode '%s' in %s; defaulting to delete_and_warn",
-                mode,
-                self.path,
-            )
-            mode = "delete_and_warn"
-        self._mode = mode
-
-        raw_lifetime = data.get("warning_lifetime_seconds", 5)
-        try:
-            self._warning_lifetime = max(0, int(raw_lifetime))
-        except (TypeError, ValueError):
-            self._warning_lifetime = 5
-
-        raw_messages = data.get("warning_messages")
-        if isinstance(raw_messages, list) and raw_messages:
-            parsed = [
-                str(msg).strip()
-                for msg in raw_messages
-                if str(msg).strip()
-            ]
-            self._warning_messages = (
-                tuple(parsed) if parsed else DEFAULT_WARNING_MESSAGES
-            )
-        else:
-            self._warning_messages = DEFAULT_WARNING_MESSAGES
-
-        self._mtime = mtime
-        logger.info(
-            "Loaded configuration from %s (mode=%s, timeout=%ss, %s msgs)",
-            self.path,
-            self._mode,
-            self._warning_lifetime,
-            len(self._warning_messages),
-        )
-
-
-CONFIG = BotConfig(CONFIG_FILE)
-
-
-def _message_text(update: Update) -> str | None:
-    message = update.effective_message
-    if message is None:
-        return None
-    text = message.text or message.caption
-    if not text:
-        return None
-    return text
-
-
-def _is_group_chat(update: Update) -> bool:
-    chat = update.effective_chat
-    return chat is not None and chat.type in GROUP_CHAT_TYPES
-
-
-async def start(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Explain that moderation only runs in groups."""
-    if update.message is None:
-        return
-    if _is_group_chat(update):
-        text = (
-            "I moderate this group and delete messages that contain "
-            "blocked words. I need to be an administrator with the "
-            "Delete messages permission."
-        )
-    else:
-        text = (
-            "I only moderate group chats, not private messages.\n\n"
-            "1. Open @BotFather, send /setprivacy, and choose Disable.\n"
-            "2. Add me to your group.\n"
-            "3. Promote me to administrator with Delete messages.\n"
-            "4. If I was already in the group before privacy was "
-            "disabled, remove me and add me again."
-        )
-    await update.message.reply_text(text)
-
-
-async def check_message(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-    """Handle group messages that contain blocked words."""
-    message = update.effective_message
-    if message is None or not _is_group_chat(update):
-        return
-    if message.from_user is not None and message.from_user.is_bot:
-        return
-
-    text = _message_text(update)
-    if text is None:
-        return
-
-    found = MATCHER.find_matches(text)
-    if not found:
-        return
-
-    chat = update.effective_chat
-    user = message.from_user
-    username = user.username if user is not None else None
-    mode = CONFIG.mode
-    logger.info(
-        "Detected blocked words in chat %s from %s (mode: %s, matches: %s)",
-        chat.id if chat is not None else None,
-        username,
-        mode,
-        found,
-    )
-
-    should_delete = mode in {"delete_and_warn", "delete_only"}
-    should_warn = mode in {"delete_and_warn", "warn_only"}
-
-    if should_delete:
-        try:
-            await message.delete()
-        except Forbidden:
-            logger.error(
-                "Cannot delete messages in chat %s. Promote the bot to "
-                "administrator and grant Delete messages.",
-                chat.id if chat is not None else None,
-            )
-            return
-        except BadRequest as exc:
-            logger.error("Failed to delete message: %s", exc)
-            return
-
-    if should_warn:
-        await _send_temporary_warning(update, context, found)
-
-
-async def _send_temporary_warning(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    matches: list[str],
-) -> None:
-    """Notify user and optionally remove warning after configured timeout."""
-    message = update.effective_message
-    chat = update.effective_chat
-    if message is None or chat is None:
-        return
-
-    user = message.from_user
-    mention = user.mention_html() if user is not None else "User"
-    template = random.choice(CONFIG.warning_messages)
-    warning = (
-        template
-        .replace("{mention}", mention)
-        .replace("{words}", ", ".join(matches))
-    )
-    send_kwargs: dict[str, object] = {
-        "chat_id": chat.id,
-        "text": warning,
-        "parse_mode": ParseMode.HTML,
-    }
-    if message.message_thread_id:
-        send_kwargs["message_thread_id"] = message.message_thread_id
-
-    try:
-        sent = await context.bot.send_message(**send_kwargs)
-    except TelegramError as exc:
-        logger.error("Failed to send warning: %s", exc)
-        return
-
-    lifetime = CONFIG.warning_lifetime_seconds
-    if lifetime > 0:
-        await asyncio.sleep(lifetime)
-        try:
-            await context.bot.delete_message(
-                chat_id=chat.id,
-                message_id=sent.message_id,
-            )
-        except TelegramError as exc:
-            logger.warning("Failed to delete warning message: %s", exc)
-
-
-async def on_my_chat_member(
-    update: Update,
-    _context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-    """Log whether the bot can actually moderate a group it joined."""
-    event = update.my_chat_member
-    if event is None or event.chat.type not in GROUP_CHAT_TYPES:
-        return
-
-    new_member = event.new_chat_member
-    chat_label = event.chat.title or event.chat.id
-    status = new_member.status
-
-    if status in {"left", "kicked"}:
-        logger.info("Bot was removed from %s", chat_label)
-        return
-
-    if isinstance(new_member, ChatMemberOwner) or (
-        isinstance(new_member, ChatMemberAdministrator)
-        and new_member.can_delete_messages
-    ):
-        logger.info("Bot can delete messages in %s", chat_label)
-        return
-
-    logger.warning(
-        "Bot cannot delete messages in %s (status=%s). Promote it to "
-        "administrator with the Delete messages permission. If privacy "
-        "mode is still enabled, ordinary group messages will also be "
-        "invisible until /setprivacy is Disable and the bot is re-added.",
-        chat_label,
-        status,
-    )
-
-
-async def post_init(application: Application) -> None:
-    """Warn at startup if Telegram privacy mode will hide group messages."""
-    me = await application.bot.get_me()
-    logger.info("Starting as @%s", me.username)
-    if not me.can_read_all_group_messages:
-        logger.warning(
-            "Group privacy mode is enabled, so Telegram will not send "
-            "ordinary group messages (only commands, mentions, replies, "
-            "and comments on linked channel posts). Disable it in "
-            "@BotFather with /setprivacy -> Disable, then remove and "
-            "re-add the bot to each group. Making the bot an "
-            "administrator also grants access to all group messages.",
-        )
 
 
 def main() -> None:
@@ -419,12 +46,12 @@ def main() -> None:
     except RuntimeError:
         asyncio.set_event_loop(asyncio.new_event_loop())
 
-    MATCHER.find_matches("")
-    if not MATCHER.words:
+    dict_words = MODERATION_SERVICE.dictionary_mod.words
+    if "dictionary" in CONFIG.moderation_checks and not dict_words:
         logger.warning(
-            "No bad words loaded from %s. The bot will not delete "
-            "any messages until the file contains at least one phrase.",
-            BAD_WORDS_FILE,
+            "Dictionary moderation is enabled, but no bad words are loaded "
+            "from %s.",
+            MODERATION_SERVICE.dictionary_mod.path,
         )
 
     _ = CONFIG.mode
@@ -433,6 +60,7 @@ def main() -> None:
         Application.builder()
         .token(token)
         .post_init(post_init)
+        .post_shutdown(post_shutdown)
         .build()
     )
     application.add_handler(CommandHandler("start", start))

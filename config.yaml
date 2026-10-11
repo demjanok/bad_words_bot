@@ -9,12 +9,24 @@ mode: delete_and_warn
 # Lifetime of warning messages in seconds. Set to 0 to keep warnings permanently.
 warning_lifetime_seconds: 5
 
+# Active moderation checks (can enable one or both):
+# - dictionary : check words against bad_words.txt
+# - openai     : check text using OpenAI Moderation API (requires OPENAI_API_KEY in .env)
+moderation_checks:
+  - dictionary
+  - openai
+
+# Optional OpenAI moderation settings
+openai:
+  model: "omni-moderation-latest"
+  timeout: 5.0
+
 # Custom warning message templates.
 # A template is randomly selected for each warning.
 # Placeholders:
 #   {mention} - clickable HTML mention of the user
-#   {words}   - matched blocked words
+#   {words}   - matched blocked words or triggered categories
 warning_messages:
-  - "⚠️ {mention}, ваше повідомлення видалено через заборонені слова."
-  - "⚠️ {mention}, будь ласка, дотримуйтесь правил спільноти та не вживайте ненормативну лексику."
-  - "⛔️ {mention}, нецензурна лексика в цьому чаті заборонена."
+  - "⚠️ {mention}, ваше повідомлення видалено через заборонений вміст."
+  - "⚠️ {mention}, будь ласка, дотримуйтесь правил спільноти та спілкуйтесь коректно."
+  - "⛔️ {mention}, неприпустимий вміст у цьому чаті заборонено."

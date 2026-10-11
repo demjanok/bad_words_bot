@@ -38,6 +38,7 @@ Create a `.env` file:
 
 ```
 TELEGRAM_BOT_TOKEN=123456:ABC...
+OPENAI_API_KEY=sk-...   # Required if OpenAI moderation is enabled
 LOG_LEVEL=INFO
 ```
 
@@ -50,7 +51,7 @@ python main.py
 
 ## Configuration (`config.yaml`)
 
-Operating modes and custom response templates are configured in `config.yaml`.
+Operating modes, active moderation backends, and response templates are configured in `config.yaml`.
 Changes to this file are automatically hot-reloaded without restarting the bot:
 
 ```yaml
@@ -63,12 +64,24 @@ mode: delete_and_warn
 # Lifetime of warning messages in seconds (0 to keep permanently)
 warning_lifetime_seconds: 5
 
+# Active moderation checks (enable one or both):
+# - dictionary : check against bad_words.txt
+# - openai     : check via OpenAI Moderation API (needs OPENAI_API_KEY in .env)
+moderation_checks:
+  - dictionary
+  - openai
+
+# Optional OpenAI moderation settings
+openai:
+  model: "omni-moderation-latest"
+  timeout: 5.0
+
 # Custom warning templates (randomly picked).
 # Available placeholders: {mention}, {words}
 warning_messages:
-  - "⚠️ {mention}, ваше повідомлення видалено через заборонені слова."
+  - "⚠️ {mention}, ваше повідомлення видалено через заборонений вміст."
   - "⚠️ {mention}, будь ласка, не вживайте ненормативну лексику."
-  - "⛔️ {mention}, нецензурна лексика в цьому чаті заборонена."
+  - "⛔️ {mention}, неприпустимий вміст у цьому чаті заборонено."
 ```
 
 ## Permissions checklist
