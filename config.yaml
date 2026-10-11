@@ -1,0 +1,20 @@
+# Configuration for Bad Words Bot
+
+# Moderation mode:
+# - delete_and_warn : Delete offending message and post a warning
+# - warn_only       : Post a warning without deleting the message
+# - delete_only     : Delete offending message silently (no warning)
+mode: delete_and_warn
+
+# Lifetime of warning messages in seconds. Set to 0 to keep warnings permanently.
+warning_lifetime_seconds: 5
+
+# Custom warning message templates.
+# A template is randomly selected for each warning.
+# Placeholders:
+#   {mention} - clickable HTML mention of the user
+#   {words}   - matched blocked words
+warning_messages:
+  - "⚠️ {mention}, ваше повідомлення видалено через заборонені слова."
+  - "⚠️ {mention}, будь ласка, дотримуйтесь правил спільноти та не вживайте ненормативну лексику."
+  - "⛔️ {mention}, нецензурна лексика в цьому чаті заборонена."

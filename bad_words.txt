@@ -1,0 +1,6 @@
+# One word or phrase per line. Matching is case-insensitive.
+# Whole words/phrases are matched, so "ass" will not match "class".
+# Lines starting with # are ignored.
+ass
+pisun
+срака

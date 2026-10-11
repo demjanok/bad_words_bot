@@ -1,0 +1,22 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+
+# Secrets — never bake into the image
+.env
+
+# IDE / OS
+.idea/
+.ollamassist/
+*.log
+.python-version
+.DS_Store
+
+# Git
+.git/
+.gitignore

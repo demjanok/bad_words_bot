@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import os
+import random
 import re
 import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
+import yaml
 from telegram import ChatMemberAdministrator, ChatMemberOwner, Update
 from telegram.constants import ChatType, ParseMode
 from telegram.error import BadRequest, Forbidden, TelegramError
@@ -27,7 +29,7 @@ logger = setup_logging()
 
 BASE_DIR = Path(__file__).resolve().parent
 BAD_WORDS_FILE = BASE_DIR / "bad_words.txt"
-WARNING_LIFETIME_SECONDS = 5
+CONFIG_FILE = BASE_DIR / "config.yaml"
 
 # Groups and supergroups only. Channel comments live in a linked
 # discussion *group*, but ordinary group messages are ignored by Telegram
@@ -116,6 +118,107 @@ def _compile_pattern(words: list[str]) -> re.Pattern[str] | None:
 
 MATCHER = BadWordMatcher(BAD_WORDS_FILE)
 
+VALID_MODES = frozenset({"delete_and_warn", "warn_only", "delete_only"})
+DEFAULT_WARNING_MESSAGES = (
+    "⚠️ {mention}, your message has been deleted because it "
+    "contains inappropriate words.",
+)
+
+
+class BotConfig:
+    """Load configuration from YAML and reload when the file changes."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._mtime: float | None = None
+        self._mode: str = "delete_and_warn"
+        self._warning_lifetime: int = 5
+        self._warning_messages: tuple[str, ...] = DEFAULT_WARNING_MESSAGES
+
+    @property
+    def mode(self) -> str:
+        self._reload_if_changed()
+        return self._mode
+
+    @property
+    def warning_lifetime_seconds(self) -> int:
+        self._reload_if_changed()
+        return self._warning_lifetime
+
+    @property
+    def warning_messages(self) -> tuple[str, ...]:
+        self._reload_if_changed()
+        return self._warning_messages
+
+    def _reload_if_changed(self) -> None:
+        try:
+            mtime = self.path.stat().st_mtime
+        except OSError:
+            if self._mtime is not None:
+                return
+            logger.warning(
+                "Could not read %s; using default configuration",
+                self.path,
+            )
+            self._mtime = -1.0
+            return
+
+        if self._mtime == mtime:
+            return
+
+        try:
+            with self.path.open(encoding="utf-8") as handle:
+                data = yaml.safe_load(handle) or {}
+        except Exception as exc:
+            logger.error(
+                "Failed to parse %s: %s; keeping current configuration",
+                self.path,
+                exc,
+            )
+            self._mtime = mtime
+            return
+
+        mode = str(data.get("mode", "delete_and_warn")).strip().lower()
+        if mode not in VALID_MODES:
+            logger.warning(
+                "Invalid mode '%s' in %s; defaulting to delete_and_warn",
+                mode,
+                self.path,
+            )
+            mode = "delete_and_warn"
+        self._mode = mode
+
+        raw_lifetime = data.get("warning_lifetime_seconds", 5)
+        try:
+            self._warning_lifetime = max(0, int(raw_lifetime))
+        except (TypeError, ValueError):
+            self._warning_lifetime = 5
+
+        raw_messages = data.get("warning_messages")
+        if isinstance(raw_messages, list) and raw_messages:
+            parsed = [
+                str(msg).strip()
+                for msg in raw_messages
+                if str(msg).strip()
+            ]
+            self._warning_messages = (
+                tuple(parsed) if parsed else DEFAULT_WARNING_MESSAGES
+            )
+        else:
+            self._warning_messages = DEFAULT_WARNING_MESSAGES
+
+        self._mtime = mtime
+        logger.info(
+            "Loaded configuration from %s (mode=%s, timeout=%ss, %s msgs)",
+            self.path,
+            self._mode,
+            self._warning_lifetime,
+            len(self._warning_messages),
+        )
+
+
+CONFIG = BotConfig(CONFIG_FILE)
+
 
 def _message_text(update: Update) -> str | None:
     message = update.effective_message
@@ -158,7 +261,7 @@ async def check_message(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-    """Delete group messages that contain blocked words."""
+    """Handle group messages that contain blocked words."""
     message = update.effective_message
     if message is None or not _is_group_chat(update):
         return
@@ -176,34 +279,42 @@ async def check_message(
     chat = update.effective_chat
     user = message.from_user
     username = user.username if user is not None else None
+    mode = CONFIG.mode
     logger.info(
-        "Blocked message in chat %s from %s (matches: %s)",
+        "Detected blocked words in chat %s from %s (mode: %s, matches: %s)",
         chat.id if chat is not None else None,
         username,
+        mode,
         found,
     )
 
-    try:
-        await message.delete()
-    except Forbidden:
-        logger.error(
-            "Cannot delete messages in chat %s. Promote the bot to "
-            "administrator and grant Delete messages.",
-            chat.id if chat is not None else None,
-        )
-        return
-    except BadRequest as exc:
-        logger.error("Failed to delete message: %s", exc)
-        return
+    should_delete = mode in {"delete_and_warn", "delete_only"}
+    should_warn = mode in {"delete_and_warn", "warn_only"}
 
-    await _send_temporary_warning(update, context)
+    if should_delete:
+        try:
+            await message.delete()
+        except Forbidden:
+            logger.error(
+                "Cannot delete messages in chat %s. Promote the bot to "
+                "administrator and grant Delete messages.",
+                chat.id if chat is not None else None,
+            )
+            return
+        except BadRequest as exc:
+            logger.error("Failed to delete message: %s", exc)
+            return
+
+    if should_warn:
+        await _send_temporary_warning(update, context, found)
 
 
 async def _send_temporary_warning(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
+    matches: list[str],
 ) -> None:
-    """Notify the user, then remove the notice after a short delay."""
+    """Notify user and optionally remove warning after configured timeout."""
     message = update.effective_message
     chat = update.effective_chat
     if message is None or chat is None:
@@ -211,9 +322,11 @@ async def _send_temporary_warning(
 
     user = message.from_user
     mention = user.mention_html() if user is not None else "User"
+    template = random.choice(CONFIG.warning_messages)
     warning = (
-        f"⚠️ {mention}, your message has been deleted because it "
-        "contains inappropriate words."
+        template
+        .replace("{mention}", mention)
+        .replace("{words}", ", ".join(matches))
     )
     send_kwargs: dict[str, object] = {
         "chat_id": chat.id,
@@ -229,14 +342,16 @@ async def _send_temporary_warning(
         logger.error("Failed to send warning: %s", exc)
         return
 
-    await asyncio.sleep(WARNING_LIFETIME_SECONDS)
-    try:
-        await context.bot.delete_message(
-            chat_id=chat.id,
-            message_id=sent.message_id,
-        )
-    except TelegramError as exc:
-        logger.warning("Failed to delete warning message: %s", exc)
+    lifetime = CONFIG.warning_lifetime_seconds
+    if lifetime > 0:
+        await asyncio.sleep(lifetime)
+        try:
+            await context.bot.delete_message(
+                chat_id=chat.id,
+                message_id=sent.message_id,
+            )
+        except TelegramError as exc:
+            logger.warning("Failed to delete warning message: %s", exc)
 
 
 async def on_my_chat_member(
@@ -311,6 +426,8 @@ def main() -> None:
             "any messages until the file contains at least one phrase.",
             BAD_WORDS_FILE,
         )
+
+    _ = CONFIG.mode
 
     application = (
         Application.builder()
