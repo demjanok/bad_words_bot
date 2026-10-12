@@ -46,12 +46,11 @@ def main() -> None:
     except RuntimeError:
         asyncio.set_event_loop(asyncio.new_event_loop())
 
-    dict_words = MODERATION_SERVICE.dictionary_mod.words
-    if "dictionary" in CONFIG.moderation_checks and not dict_words:
+    words_count = MODERATION_SERVICE.dictionary_mod.words_count
+    if "dictionary" in CONFIG.moderation_checks and not words_count:
         logger.warning(
             "Dictionary moderation is enabled, but no bad words are loaded "
-            "from %s.",
-            MODERATION_SERVICE.dictionary_mod.path,
+            "from configured dictionary files.",
         )
 
     _ = CONFIG.mode

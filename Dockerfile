@@ -25,6 +25,7 @@ COPY moderators/ ./moderators/
 # These files are mounted at runtime via volumes (see docker-compose.yml),
 # but we copy defaults so the image can run without a mounted volume.
 COPY bad_words.txt config.yaml ./
+COPY dictionaries/ ./dictionaries/
 
 # Run as non-root
 USER botuser

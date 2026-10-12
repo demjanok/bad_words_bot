@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 import logging
-from pathlib import Path
 
 from config import BotConfig
 from moderators.base import BaseModerator
@@ -36,9 +35,9 @@ class ModerationResult:
 class ModerationService:
     """Coordinates multiple moderation checks based on configuration."""
 
-    def __init__(self, config: BotConfig, bad_words_file: Path) -> None:
+    def __init__(self, config: BotConfig) -> None:
         self.config = config
-        self.dictionary_mod = DictionaryModerator(bad_words_file)
+        self.dictionary_mod = DictionaryModerator(config)
         self.openai_mod = OpenAIModerator(config)
         self._moderators: dict[str, BaseModerator] = {
             self.dictionary_mod.name: self.dictionary_mod,
@@ -70,7 +69,10 @@ class ModerationService:
         for mod, matches in zip(active_moderators, results):
             if matches:
                 sources[mod.name] = matches
-                all_matches_list.extend(matches)
+                for match in matches:
+                    # Strip source annotation for clean user-facing words
+                    clean = match.split(" (")[0] if " (" in match else match
+                    all_matches_list.append(clean)
 
         seen: set[str] = set()
         unique_matches: list[str] = []

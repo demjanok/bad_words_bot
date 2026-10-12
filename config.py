@@ -21,13 +21,17 @@ DEFAULT_WARNING_MESSAGES = (
 class BotConfig:
     """Load configuration from YAML and reload when the file changes."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, base_dir: Path | None = None) -> None:
         self.path = path
+        self.base_dir = base_dir or path.resolve().parent
         self._mtime: float | None = None
         self._mode: str = "delete_and_warn"
         self._warning_lifetime: int = 5
         self._warning_messages: tuple[str, ...] = DEFAULT_WARNING_MESSAGES
         self._moderation_checks: tuple[str, ...] = ("dictionary",)
+        self._dictionary_files: tuple[Path, ...] = (
+            self.base_dir / "bad_words.txt",
+        )
         self._openai_model: str = "omni-moderation-latest"
         self._openai_timeout: float = 5.0
 
@@ -50,6 +54,11 @@ class BotConfig:
     def moderation_checks(self) -> tuple[str, ...]:
         self._reload_if_changed()
         return self._moderation_checks
+
+    @property
+    def dictionary_files(self) -> tuple[Path, ...]:
+        self._reload_if_changed()
+        return self._dictionary_files
 
     @property
     def openai_model(self) -> str:
@@ -131,6 +140,28 @@ class BotConfig:
         else:
             self._moderation_checks = ("dictionary",)
 
+        dict_cfg = data.get("dictionary") or {}
+        raw_files = None
+        if isinstance(dict_cfg, dict):
+            raw_files = dict_cfg.get("files")
+        elif isinstance(data.get("dictionary_files"), list):
+            raw_files = data.get("dictionary_files")
+
+        if isinstance(raw_files, list) and raw_files:
+            file_paths: list[Path] = []
+            for item in raw_files:
+                p = Path(str(item).strip())
+                if not p.is_absolute():
+                    p = self.base_dir / p
+                file_paths.append(p)
+            self._dictionary_files = (
+                tuple(file_paths) if file_paths else (
+                    self.base_dir / "bad_words.txt",
+                )
+            )
+        else:
+            self._dictionary_files = (self.base_dir / "bad_words.txt",)
+
         openai_cfg = data.get("openai") or {}
         if isinstance(openai_cfg, dict):
             self._openai_model = str(
@@ -146,9 +177,11 @@ class BotConfig:
 
         self._mtime = mtime
         logger.info(
-            "Loaded configuration from %s (mode=%s, timeout=%ss, checks=%s)",
+            "Loaded configuration from %s (mode=%s, timeout=%ss, "
+            "dict_files=%s, checks=%s)",
             self.path,
             self._mode,
             self._warning_lifetime,
+            [f.name for f in self._dictionary_files],
             list(self._moderation_checks),
         )

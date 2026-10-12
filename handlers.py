@@ -19,10 +19,8 @@ logger = logging.getLogger("bad_words_bot")
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = BASE_DIR / "config.yaml"
-BAD_WORDS_FILE = BASE_DIR / "bad_words.txt"
-
 CONFIG = BotConfig(CONFIG_FILE)
-MODERATION_SERVICE = ModerationService(CONFIG, BAD_WORDS_FILE)
+MODERATION_SERVICE = ModerationService(CONFIG)
 
 GROUP_CHAT_TYPES = frozenset({ChatType.GROUP, ChatType.SUPERGROUP})
 GROUP_MESSAGES = (

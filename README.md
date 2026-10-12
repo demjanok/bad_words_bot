@@ -65,11 +65,18 @@ mode: delete_and_warn
 warning_lifetime_seconds: 5
 
 # Active moderation checks (enable one or both):
-# - dictionary : check against bad_words.txt
+# - dictionary : check against bad_words.txt (fast Aho-Corasick algorithm)
 # - openai     : check via OpenAI Moderation API (needs OPENAI_API_KEY in .env)
 moderation_checks:
   - dictionary
   - openai
+
+# Dictionary word lists (can specify multiple files, e.g. for different languages)
+dictionary:
+  files:
+    - bad_words.txt
+    - dictionaries/uk.txt
+    - dictionaries/en.txt
 
 # Optional OpenAI moderation settings
 openai:

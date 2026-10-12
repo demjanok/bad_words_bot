@@ -3,3 +3,4 @@ python-json-logger~=4.0.0
 python-dotenv~=1.0.1
 PyYAML~=6.0.3
 httpx~=0.28.1
+pyahocorasick~=2.3.1

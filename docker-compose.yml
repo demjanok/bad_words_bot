@@ -12,6 +12,7 @@ services:
     # Mount editable files so changes are picked up without rebuilding the image
     volumes:
       - ./bad_words.txt:/app/bad_words.txt:ro
+      - ./dictionaries:/app/dictionaries:ro
       - ./config.yaml:/app/config.yaml:ro
 
     # Structured JSON logs are written to stdout — Docker captures them
